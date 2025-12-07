@@ -1,0 +1,35 @@
+{
+  "expert_id": 1,
+  "expert_name": "QuantumEnhanced_PM10_Predictor",
+  "architecture": {
+    "type": "Quantum-Enhanced Sequential",
+    "input_shape": [
+      5,
+      10,
+      10,
+      24
+    ],
+    "output_shape": [
+      10,
+      10,
+      1
+    ],
+    "quantum_inspired": true
+  },
+  "training": {
+    "epochs_trained": 30,
+    "final_train_loss": 0.0018070087535306811,
+    "final_val_loss": 0.0037564814556390047,
+    "training_time_seconds": 375.4685823917389,
+    "batch_size": 4,
+    "learning_rate": 0.001
+  },
+  "performance": {
+    "test_mse": 0.00191467662807554,
+    "test_mae": 0.030104435980319977,
+    "test_r2": 0.9551446497840179
+  },
+  "target_band": "PM10",
+  "saved_format": "TensorFlow SavedModel",
+  "timestamp": "2025-11-20 10:17:26"
+}
