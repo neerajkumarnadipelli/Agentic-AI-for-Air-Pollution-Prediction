@@ -1,0 +1,35 @@
+{
+  "expert_id": 3,
+  "expert_name": "QuantumEnhanced_NO2_Predictor",
+  "architecture": {
+    "type": "Quantum-Enhanced Sequential",
+    "input_shape": [
+      5,
+      10,
+      10,
+      24
+    ],
+    "output_shape": [
+      10,
+      10,
+      1
+    ],
+    "quantum_inspired": true
+  },
+  "training": {
+    "epochs_trained": 36,
+    "final_train_loss": 0.0023227545898407698,
+    "final_val_loss": 0.004654339049011469,
+    "training_time_seconds": 454.4306137561798,
+    "batch_size": 4,
+    "learning_rate": 0.001
+  },
+  "performance": {
+    "test_mse": 0.0019956198520958424,
+    "test_mae": 0.03066157177090645,
+    "test_r2": 0.8976161934672259
+  },
+  "target_band": "NO2",
+  "saved_format": "TensorFlow SavedModel",
+  "timestamp": "2025-11-20 10:25:17"
+}
