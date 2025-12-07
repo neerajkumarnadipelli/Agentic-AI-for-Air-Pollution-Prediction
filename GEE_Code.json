@@ -1,0 +1,649 @@
+// ==========================================================================================
+// Section 1: Configuration - OPTIMIZED FOR AIR POLLUTION PREDICTION - DELHI
+// ==========================================================================================
+
+var studyArea = ee.Geometry.Point([77.1025, 28.7041]); // Delhi coordinates
+var startDate = '2021-02-15';
+var endDate = '2021-03-20';
+var bufferRadius_km = 20;
+var analysisZone = studyArea.buffer(bufferRadius_km * 1000);
+
+// COMMON RESOLUTION PARAMETERS
+var COMMON_SCALE = 100; // 100 meters spatial resolution
+var TEMPORAL_RESOLUTION_DAYS = 1; // Daily intervals
+
+Map.centerObject(studyArea, 9);
+Map.addLayer(analysisZone, {color: 'yellow', fillColor: '00000000'}, 'Analysis Zone');
+
+// ==========================================================================================
+// Section 2: High-Resolution Static Data (100m) - ALL CONVERTED TO FLOAT
+// ==========================================================================================
+
+// --- 2.1: Land Cover @ 100m ---
+var landCover = ee.Image('ESA/WorldCover/v100/2020')
+    .select('Map')
+    .rename('land_cover')
+    .toFloat()
+    .resample('bilinear')
+    .reproject({
+      crs: 'EPSG:4326',
+      scale: COMMON_SCALE
+    })
+    .clip(analysisZone);
+
+// --- 2.2: DEM & Topography @ 30m (downscaled to 100m) ---
+var dem = ee.Image('USGS/SRTMGL1_003')
+    .rename('elevation')
+    .toFloat()
+    .resample('bilinear')
+    .reproject({
+      crs: 'EPSG:4326',
+      scale: COMMON_SCALE
+    })
+    .clip(analysisZone);
+
+var slope = ee.Terrain.slope(dem)
+    .rename('slope')
+    .toFloat();
+
+var aspect = ee.Terrain.aspect(dem)
+    .rename('aspect')
+    .toFloat();
+
+// --- 2.3: Human Activity @ 100m ---
+var population = ee.ImageCollection('WorldPop/GP/100m/pop')
+    .filter(ee.Filter.eq('country', 'IND'))
+    .filterDate('2020-01-01', '2020-12-31')
+    .select('population')
+    .mosaic()
+    .rename('population_density')
+    .toFloat()
+    .reproject({
+      crs: 'EPSG:4326',
+      scale: COMMON_SCALE
+    })
+    .clip(analysisZone);
+
+// --- 2.4: Enhanced Human Activity @ 100m ---
+var nighttimeLights = ee.ImageCollection('NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG')
+    .filterDate('2020-01-01', '2020-12-31')
+    .select('avg_rad')
+    .mean()
+    .rename('nighttime_lights')
+    .toFloat()
+    .resample('bilinear')
+    .reproject({
+      crs: 'EPSG:4326',
+      scale: COMMON_SCALE
+    })
+    .clip(analysisZone);
+
+// --- 2.5: NDVI Mean (Long-term vegetation) ---
+var ndviMean = ee.ImageCollection('MODIS/006/MOD13A1')
+    .filterDate('2020-01-01', '2020-12-31')
+    .select('NDVI')
+    .mean()
+    .multiply(0.0001) // Scale factor
+    .rename('ndvi_mean')
+    .toFloat()
+    .resample('bilinear')
+    .reproject({
+      crs: 'EPSG:4326',
+      scale: COMMON_SCALE
+    })
+    .clip(analysisZone);
+
+// --- 2.6: Urban Fraction ---
+var urbanMask = landCover.eq(50); // ESA WorldCover urban class = 50
+var urbanFraction = urbanMask.rename('urban_fraction')
+    .toFloat()
+    .reproject({
+      crs: 'EPSG:4326',
+      scale: COMMON_SCALE
+    })
+    .clip(analysisZone);
+
+// --- 2.7: Industrial Areas (using nighttime lights as proxy) ---
+var industrialAreas = nighttimeLights.gt(10) // High nighttime lights indicate industrial/commercial areas
+    .rename('industrial_areas')
+    .toFloat()
+    .reproject({
+      crs: 'EPSG:4326',
+      scale: COMMON_SCALE
+    })
+    .clip(analysisZone);
+
+// Combine static features - ALL FLOAT
+var staticFeatures = landCover
+    .addBands(dem)
+    .addBands(slope)
+    .addBands(aspect)
+    .addBands(population)
+    .addBands(nighttimeLights)
+    .addBands(ndviMean)
+    .addBands(urbanFraction)
+    .addBands(industrialAreas);
+
+print('Static features bands:', staticFeatures.bandNames());
+print('Static features data types:', staticFeatures.bandTypes());
+
+// ==========================================================================================
+// Section 3: Daily Air Quality Data - ALL CONVERTED TO FLOAT
+// ==========================================================================================
+
+// Function to create empty air quality image
+function createEmptyAirQualityImage(date) {
+  return ee.Image.constant(-999)
+    .toFloat()
+    .rename('pm25')
+    .addBands(ee.Image.constant(-999).toFloat().rename('pm10'))
+    .addBands(ee.Image.constant(-999).toFloat().rename('no2'))
+    .addBands(ee.Image.constant(-999).toFloat().rename('so2'))
+    .addBands(ee.Image.constant(-999).toFloat().rename('co'))
+    .addBands(ee.Image.constant(-999).toFloat().rename('o3'))
+    .addBands(ee.Image.constant(-999).toFloat().rename('aod'))
+    .set('system:time_start', date.millis())
+    .set('is_empty', 1)
+    .reproject({crs: 'EPSG:4326', scale: COMMON_SCALE});
+}
+
+// Function to get daily air quality data
+function getDailyAirQualityData(date) {
+  var startTime = ee.Date(date);
+  var endTime = startTime.advance(1, 'day');
+  
+  // --- AOD from MODIS (Correct collection name) ---
+  var aodData = ee.ImageCollection('MODIS/061/MCD19A2_GRANULES')
+      .filterDate(startTime, endTime)
+      .filterBounds(analysisZone)
+      .select('Optical_Depth_047');
+  
+  // --- TROPOMI gases ---
+  var no2Data = ee.ImageCollection('COPERNICUS/S5P/OFFL/L3_NO2')
+      .filterDate(startTime, endTime)
+      .filterBounds(analysisZone)
+      .select('NO2_column_number_density');
+  
+  var so2Data = ee.ImageCollection('COPERNICUS/S5P/OFFL/L3_SO2')
+      .filterDate(startTime, endTime)
+      .filterBounds(analysisZone)
+      .select('SO2_column_number_density');
+  
+  var coData = ee.ImageCollection('COPERNICUS/S5P/OFFL/L3_CO')
+      .filterDate(startTime, endTime)
+      .filterBounds(analysisZone)
+      .select('CO_column_number_density');
+  
+  var o3Data = ee.ImageCollection('COPERNICUS/S5P/OFFL/L3_O3')
+      .filterDate(startTime, endTime)
+      .filterBounds(analysisZone)
+      .select('O3_column_number_density');
+  
+  // Process and combine data
+  var aod = aodData.mean()
+      .multiply(0.001) // Scale factor
+      .rename('aod')
+      .toFloat();
+  
+  // Estimate PM2.5 from AOD (simplified relationship for Delhi)
+  var pm25 = aod.multiply(80).rename('pm25').toFloat(); // Rough conversion factor
+  
+  // Estimate PM10 (typically 2-3 times PM2.5 in urban areas)
+  var pm10 = pm25.multiply(2.5).rename('pm10').toFloat();
+  
+  var no2 = no2Data.mean()
+      .multiply(1e6) // Convert to µmol/m²
+      .rename('no2')
+      .toFloat();
+  
+  var so2 = so2Data.mean()
+      .multiply(1e6) // Convert to µmol/m²
+      .rename('so2')
+      .toFloat();
+  
+  var co = coData.mean()
+      .multiply(1e6) // Convert to µmol/m²
+      .rename('co')
+      .toFloat();
+  
+  var o3 = o3Data.mean()
+      .multiply(1e6) // Convert to µmol/m²
+      .rename('o3')
+      .toFloat();
+  
+  // Combine all air quality bands
+  var airQualityData = pm25
+      .addBands(pm10)
+      .addBands(no2)
+      .addBands(so2)
+      .addBands(co)
+      .addBands(o3)
+      .addBands(aod)
+      .resample('bilinear')
+      .reproject({crs: 'EPSG:4326', scale: COMMON_SCALE})
+      .set('system:time_start', startTime.millis())
+      .set('is_empty', 0);
+  
+  // Check if we have any data
+  var hasData = aodData.size().gt(0)
+      .or(no2Data.size().gt(0))
+      .or(so2Data.size().gt(0));
+  
+  return ee.Image(ee.Algorithms.If({
+    condition: hasData,
+    trueCase: airQualityData,
+    falseCase: createEmptyAirQualityImage(startTime)
+  }));
+}
+
+// ==========================================================================================
+// Section 4: Daily Meteorological Data - ALL CONVERTED TO FLOAT
+// ==========================================================================================
+
+// Function to create empty weather image
+function createEmptyWeatherImage(date) {
+  return ee.Image.constant(-999)
+    .toFloat()
+    .rename('temp_2m')
+    .addBands(ee.Image.constant(-999).toFloat().rename('relative_humidity'))
+    .addBands(ee.Image.constant(-999).toFloat().rename('wind_speed_10m'))
+    .addBands(ee.Image.constant(-999).toFloat().rename('wind_direction_10m'))
+    .addBands(ee.Image.constant(-999).toFloat().rename('surface_pressure'))
+    .addBands(ee.Image.constant(-999).toFloat().rename('precipitation'))
+    .addBands(ee.Image.constant(-999).toFloat().rename('solar_radiation'))
+    .set('system:time_start', date.millis())
+    .set('is_empty', 1)
+    .reproject({crs: 'EPSG:4326', scale: COMMON_SCALE});
+}
+
+// Function to get daily meteorological data
+function getDailyMeteorologicalData(date) {
+  var startTime = ee.Date(date);
+  var endTime = startTime.advance(1, 'day');
+  
+  var hourlyData = ee.ImageCollection("ECMWF/ERA5_LAND/HOURLY")
+      .filterDate(startTime, endTime)
+      .filterBounds(analysisZone);
+  
+  var dataCount = hourlyData.size();
+  
+  // Calculate daily statistics using available bands
+  var temp2m = hourlyData.select('temperature_2m').mean()
+      .subtract(273.15).rename('temp_2m')
+      .toFloat();
+  
+  var dewpoint = hourlyData.select('dewpoint_temperature_2m').mean()
+      .subtract(273.15);
+  
+  var relativeHumidity = dewpoint.expression(
+    '100 * (exp((17.625 * Td) / (243.04 + Td)) / exp((17.625 * T) / (243.04 + T)))', {
+    'T': temp2m, 'Td': dewpoint
+  }).rename('relative_humidity')
+    .toFloat();
+  
+  // Wind components
+  var uWindMean = hourlyData.select('u_component_of_wind_10m').mean();
+  var vWindMean = hourlyData.select('v_component_of_wind_10m').mean();
+  
+  var windSpeed = uWindMean.pow(2).add(vWindMean.pow(2)).sqrt().multiply(3.6)
+      .rename('wind_speed_10m')
+      .toFloat();
+  
+  var windDirection = vWindMean.atan2(uWindMean).multiply(180/Math.PI).add(180)
+      .rename('wind_direction_10m')
+      .toFloat();
+  
+  var surfacePressure = hourlyData.select('surface_pressure').mean()
+      .divide(100).rename('surface_pressure')
+      .toFloat();
+  
+  var precipitation = hourlyData.select('total_precipitation_hourly').sum()
+      .multiply(1000).rename('precipitation')
+      .toFloat();
+  
+ 
+  
+  // Use solar radiation as proxy for cloud cover (lower radiation = more clouds)
+  var solarRadiation = hourlyData.select('surface_solar_radiation_downwards_hourly').mean()
+      .divide(3600000).rename('solar_radiation') // Convert to kW/m²
+      .toFloat();
+  
+  // Combine all meteorological bands
+  var weatherData = temp2m
+      .addBands(relativeHumidity)
+      .addBands(windSpeed)
+      .addBands(windDirection)
+      .addBands(surfacePressure)
+      .addBands(precipitation)
+      .addBands(solarRadiation)
+      .resample('bilinear')
+      .reproject({crs: 'EPSG:4326', scale: COMMON_SCALE})
+      .set('system:time_start', startTime.millis())
+      .set('is_empty', 0);
+  
+  return ee.Image(ee.Algorithms.If({
+    condition: dataCount.gt(0),
+    trueCase: weatherData,
+    falseCase: createEmptyWeatherImage(startTime)
+  }));
+}
+
+// ==========================================================================================
+// Section 5: Fire Emissions Data - ALL CONVERTED TO FLOAT
+// ==========================================================================================
+
+function createEmptyFireImage(date) {
+  return ee.Image.constant(0)
+    .toFloat()
+    .rename('fire_emissions')
+    .set('system:time_start', date.millis())
+    .set('is_empty', 1)
+    .reproject({crs: 'EPSG:4326', scale: COMMON_SCALE});
+}
+
+function getDailyFireData(date) {
+  var startTime = ee.Date(date);
+  var endTime = startTime.advance(1, 'day');
+  
+  var fireData = ee.ImageCollection('FIRMS')
+      .filterDate(startTime, endTime)
+      .filterBounds(analysisZone)
+      .select('T21'); // Brightness temperature
+  
+  var dataCount = fireData.size();
+  
+  var fireEmissions = fireData.max()
+      .rename('fire_emissions')
+      .toFloat()
+      .resample('bilinear')
+      .reproject({crs: 'EPSG:4326', scale: COMMON_SCALE})
+      .set('system:time_start', startTime.millis())
+      .set('is_empty', 0);
+  
+  return ee.Image(ee.Algorithms.If({
+    condition: dataCount.gt(0),
+    trueCase: fireEmissions,
+    falseCase: createEmptyFireImage(startTime)
+  }));
+}
+
+// ==========================================================================================
+// Section 6: Generate Daily Dataset
+// ==========================================================================================
+
+// Create daily time sequence
+var startTime = ee.Date(startDate);
+var endTime = ee.Date(endDate);
+var intervalMillis = TEMPORAL_RESOLUTION_DAYS * 24 * 60 * 60 * 1000;
+
+var timeSequence = ee.List.sequence(
+  startTime.millis(), 
+  endTime.millis(), 
+  intervalMillis
+);
+
+print('Time sequence size:', timeSequence.size());
+
+// Generate daily datasets
+var dailyDatasets = timeSequence.map(function(timestamp) {
+  var date = ee.Date(timestamp);
+  var dateString = date.format('YYYY-MM-dd');
+  
+  var airQualityData = getDailyAirQualityData(date);
+  var weatherData = getDailyMeteorologicalData(date);
+  var fireData = getDailyFireData(date);
+  
+  // Combine all dynamic data
+  var dynamicData = ee.Image(airQualityData)
+      .addBands(ee.Image(weatherData))
+      .addBands(ee.Image(fireData))
+      .set('datetime', dateString);
+  
+  return dynamicData;
+});
+
+var dynamicCollection = ee.ImageCollection(dailyDatasets);
+
+// Filter to remove completely empty timesteps
+var nonEmptyCollection = dynamicCollection.filter(ee.Filter.neq('is_empty', 1));
+
+print('Non-empty collection size:', nonEmptyCollection.size());
+
+// ==========================================================================================
+// Section 7: Create Target Variable (Next Day PM2.5)
+// ==========================================================================================
+
+// Function to create dataset with next day PM2.5 as target
+function createTargetDataset(currentImage, collection) {
+  var currentDate = ee.Date(currentImage.get('system:time_start'));
+  var nextDate = currentDate.advance(1, 'day');
+  
+  // Find next day's PM2.5
+  var nextDayPM25 = collection
+      .filter(ee.Filter.eq('system:time_start', nextDate.millis()))
+      .select('pm25')
+      .first();
+  
+  var targetBand = ee.Image(ee.Algorithms.If({
+    condition: nextDayPM25,
+    trueCase: nextDayPM25.rename('pm25_next_day'),
+    falseCase: ee.Image.constant(-999).rename('pm25_next_day').toFloat()
+  }));
+  
+  return currentImage.addBands(targetBand);
+}
+
+// Apply target creation
+var finalCollection = nonEmptyCollection.map(function(image) {
+  return createTargetDataset(image, nonEmptyCollection);
+});
+
+// ==========================================================================================
+// Section 8: Create Final Stacked Dataset - ALL FLOAT
+// ==========================================================================================
+
+function createDailyFeatureImage(dynamicImage) {
+  var fullFeatureImage = staticFeatures
+      .addBands(ee.Image(dynamicImage))
+      .copyProperties(dynamicImage, ['system:time_start', 'datetime', 'is_empty']);
+  
+  return fullFeatureImage;
+}
+
+var finalCollection = finalCollection.map(createDailyFeatureImage);
+
+// Get collection info safely
+var finalSize = finalCollection.size();
+print('Final collection size:', finalSize);
+
+// Check if we have data before trying to access it
+var hasData = finalSize.gt(0);
+
+var sampleInfo = ee.Algorithms.If({
+  condition: hasData,
+  trueCase: ee.Dictionary({
+    'date': ee.Image(finalCollection.first()).date().format('YYYY-MM-dd'),
+    'bands': ee.Image(finalCollection.first()).bandNames(),
+    'band_types': ee.Image(finalCollection.first()).bandTypes(),
+    'message': 'Data available'
+  }),
+  falseCase: ee.Dictionary({
+    'date': 'No data',
+    'bands': ee.List([]),
+    'band_types': ee.List([]),
+    'message': 'No data available in the specified date range'
+  })
+});
+
+print('Sample info:', sampleInfo);
+
+// ==========================================================================================
+// Section 9: Data Summary and Export - ALL FLOAT
+// ==========================================================================================
+
+print('=== FINAL DATA SPECIFICATIONS ===');
+print('Spatial Resolution: ' + COMMON_SCALE + ' meters');
+print('Temporal Resolution: ' + TEMPORAL_RESOLUTION_DAYS + ' days');
+print('Date Range: ' + startDate + ' to ' + endDate);
+print('Location: Delhi, India');
+print('Total timesteps in sequence:', timeSequence.size());
+print('Non-empty timesteps:', nonEmptyCollection.size());
+
+print('=== BAND INFORMATION (ALL FLOAT) ===');
+print('STATIC BANDS (100m constant):');
+print('1. land_cover - ESA WorldCover (100m) - FLOAT');
+print('2. elevation - SRTM DEM downscaled (30m→100m) - FLOAT');
+print('3. slope - Derived from DEM (100m) - FLOAT');
+print('4. aspect - Derived from DEM (100m) - FLOAT');
+print('5. population_density - WorldPop (100m) - FLOAT');
+print('6. nighttime_lights - VIIRS downscaled (500m→100m) - FLOAT');
+print('7. ndvi_mean - MODIS NDVI long-term mean (250m→100m) - FLOAT');
+print('8. urban_fraction - Urban area percentage (100m) - FLOAT');
+print('9. industrial_areas - Industrial/commercial areas (100m) - FLOAT');
+
+print('DYNAMIC BANDS (Daily, 100m):');
+print('10. pm25 - AOD-derived PM2.5 (1km→100m) - FLOAT');
+print('11. pm10 - Estimated PM10 (100m) - FLOAT');
+print('12. no2 - TROPOMI NO₂ (7km→100m) - FLOAT');
+print('13. so2 - TROPOMI SO₂ (7km→100m) - FLOAT');
+print('14. co - TROPOMI CO (7km→100m) - FLOAT');
+print('15. o3 - TROPOMI O₃ (7km→100m) - FLOAT');
+print('16. aod - MODIS AOD (1km→100m) - FLOAT');
+print('17. temp_2m - ERA5 2m temperature (9km→100m) - FLOAT');
+print('18. relative_humidity - ERA5 relative humidity (9km→100m) - FLOAT');
+print('19. wind_speed_10m - ERA5 wind speed (9km→100m) - FLOAT');
+print('20. wind_direction_10m - ERA5 wind direction (9km→100m) - FLOAT');
+print('21. surface_pressure - ERA5 surface pressure (9km→100m) - FLOAT');
+print('22. precipitation - ERA5 precipitation (9km→100m) - FLOAT');
+print('24. solar_radiation - ERA5 solar radiation (9km→100m) - FLOAT');
+print('25. fire_emissions - FIRMS fire radiative power (1km→100m) - FLOAT');
+print('26. pm25_next_day - Target variable (next day PM2.5) - FLOAT');
+
+// Export static features only once
+Export.image.toDrive({
+  image: staticFeatures,
+  description: 'Static_Features_AirQuality_Delhi',
+  folder: 'GEE_AirQuality_Delhi_Daily_100m_FLOAT',
+  scale: COMMON_SCALE,
+  region: analysisZone.bounds(),
+  fileFormat: 'GeoTIFF',
+  maxPixels: 1e10
+});
+
+// ==========================================================================================
+// Section 10: Export ALL Timestamps - ALL FLOAT
+// ==========================================================================================
+
+print('=== EXPORTING ALL TIMESTAMPS ===');
+print('Total timestamps to export:', timeSequence.size());
+
+// Get the time sequence as a client-side list
+var timeSequenceList = timeSequence.getInfo();
+
+print('Starting export of all ' + timeSequenceList.length + ' timestamps...');
+
+// Export all timestamps
+for (var i = 0; i < timeSequenceList.length; i++) {
+  var timestamp = timeSequenceList[i];
+  var date = ee.Date(timestamp);
+  var dateString = date.format('YYYY-MM-dd').getInfo();
+  
+  // Create the image for this timestamp
+  var timestampImage = ee.Image(finalCollection
+    .filter(ee.Filter.eq('system:time_start', timestamp))
+    .first());
+  
+  // Export with descriptive filename
+  Export.image.toDrive({
+    image: timestampImage,
+    description: 'AirQuality_Delhi_' + dateString,
+    folder: 'GEE_AirQuality_Delhi_Daily_100m_FLOAT',
+    scale: COMMON_SCALE,
+    region: analysisZone.bounds(),
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e10
+  });
+  
+  // Print progress every 5 exports
+  if ((i + 1) % 5 === 0) {
+    print('Queued export for ' + (i + 1) + ' out of ' + timeSequenceList.length + ' timestamps');
+  }
+}
+
+print('=== EXPORT QUEUE COMPLETE ===');
+print('All ' + timeSequenceList.length + ' timestamps have been queued for export');
+print('Check the Tasks tab in Google Earth Engine to monitor export progress');
+
+// ==========================================================================================
+// Section 11: Quality Assessment and Visualization - ALL FLOAT
+// ==========================================================================================
+
+// Simple data availability check
+print('Data availability check:');
+print('- Static features:', staticFeatures.bandNames().size(), 'bands');
+print('- Time sequence:', timeSequence.size(), 'timesteps');
+print('- Final collection:', finalSize, 'images');
+
+// Verify all bands are float
+if (hasData.getInfo()) {
+  var firstImage = finalCollection.first();
+  var bandTypes = firstImage.bandTypes().getInfo();
+  
+  print('=== DATA TYPE VERIFICATION ===');
+  for (var band in bandTypes) {
+    var dataType = bandTypes[band];
+    print(band + ': ' + dataType + ' ' + (dataType === 'Float' ? '✓' : '✗'));
+  }
+  
+  // Add sample pollution layers to the map
+  var samplePM25 = finalCollection.select('pm25').max();
+  Map.addLayer(samplePM25, 
+    {min: 0, max: 100, palette: ['green', 'yellow', 'orange', 'red', 'purple']}, 
+    'Max PM2.5 Concentration - Delhi');
+  
+  var sampleNO2 = finalCollection.select('no2').max();
+  Map.addLayer(sampleNO2, 
+    {min: 0, max: 50, palette: ['blue', 'cyan', 'green', 'yellow', 'red']}, 
+    'Max NO2 Concentration - Delhi');
+  
+  // Create time series charts
+  var pm25Chart = ui.Chart.image.series({
+    imageCollection: finalCollection.select('pm25'),
+    region: analysisZone,
+    reducer: ee.Reducer.mean(),
+    scale: COMMON_SCALE
+  }).setOptions({
+    title: 'Daily PM2.5 Concentrations - Delhi',
+    vAxis: {title: 'PM2.5 (µg/m³)'},
+    lineWidth: 2
+  });
+  
+  var tempChart = ui.Chart.image.series({
+    imageCollection: finalCollection.select('temp_2m'),
+    region: analysisZone,
+    reducer: ee.Reducer.mean(),
+    scale: COMMON_SCALE
+  }).setOptions({
+    title: 'Daily Temperature at 2m - Delhi',
+    vAxis: {title: 'Temperature (°C)'},
+    lineWidth: 2
+  });
+  
+  print(pm25Chart);
+  print(tempChart);
+  
+  // Additional summary statistics
+  var dateRangeInfo = {
+    'First timestamp': ee.Date(timeSequence.get(0)).format('YYYY-MM-dd').getInfo(),
+    'Last timestamp': ee.Date(timeSequence.get(timeSequence.size().subtract(1))).format('YYYY-MM-dd').getInfo(),
+    'Total days': timeSequenceList.length
+  };
+  
+  print('Date Range Details:', dateRangeInfo);
+  
+} else {
+  print('No dynamic data available for visualization');
+}
+
+print('=== SCRIPT EXECUTION COMPLETE ===');
+print('AIR POLLUTION PREDICTION DATASET FOR DELHI READY - ALL DATA CONVERTED TO FLOAT');

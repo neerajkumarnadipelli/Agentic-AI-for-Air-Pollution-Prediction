@@ -1,0 +1,35 @@
+{
+  "expert_id": 6,
+  "expert_name": "QuantumEnhanced_O3_Predictor",
+  "architecture": {
+    "type": "Quantum-Enhanced Sequential",
+    "input_shape": [
+      5,
+      10,
+      10,
+      24
+    ],
+    "output_shape": [
+      10,
+      10,
+      1
+    ],
+    "quantum_inspired": true
+  },
+  "training": {
+    "epochs_trained": 44,
+    "final_train_loss": 0.0023343984503299,
+    "final_val_loss": 0.0018499984871596098,
+    "training_time_seconds": 983.3622472286224,
+    "batch_size": 4,
+    "learning_rate": 0.001
+  },
+  "performance": {
+    "test_mse": 0.0018381100380793214,
+    "test_mae": 0.03268469497561455,
+    "test_r2": 0.9709127428059883
+  },
+  "target_band": "O3",
+  "saved_format": "TensorFlow SavedModel",
+  "timestamp": "2025-11-20 23:37:34"
+}

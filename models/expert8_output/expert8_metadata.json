@@ -1,0 +1,40 @@
+{
+  "expert_id": 8,
+  "expert_name": "Advanced_Quantum_Enhanced_PM25_Predictor",
+  "architecture": {
+    "type": "Advanced Quantum-Enhanced with Attention",
+    "input_shape": [
+      5,
+      10,
+      10,
+      24
+    ],
+    "output_shape": [
+      10,
+      10,
+      1
+    ],
+    "features": [
+      "Temporal Attention",
+      "Spatial Attention",
+      "Quantum Entanglement",
+      "Advanced Quantum Layers"
+    ]
+  },
+  "training": {
+    "epochs_trained": 26,
+    "final_train_loss": 0.0010605542920529842,
+    "final_val_loss": 0.0032943144906312227,
+    "training_time_seconds": 571.0491387844086,
+    "batch_size": 4,
+    "learning_rate": 0.001
+  },
+  "performance": {
+    "test_mse": 0.0014667692594230175,
+    "test_mae": 0.024667460471391678,
+    "test_r2": 0.9656378257993411
+  },
+  "target_band": "PM2.5",
+  "saved_format": "TensorFlow SavedModel",
+  "timestamp": "2025-11-27 00:29:14"
+}
